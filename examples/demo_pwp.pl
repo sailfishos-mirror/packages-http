@@ -5,9 +5,13 @@
 :- use_module(library(http/html_write)).
 :- use_module(library(http/http_pwp)).
 
-:- prolog_load_context(directory, Dir),
-   asserta(user:file_search_path(http_demo, Dir)).
+:- dynamic user:file_search_path/2.
+:- multifile user:file_search_path/2.
 
+pwp_here.
+user:file_search_path(http_demo, Dir) :-
+    source_file(pwp_here, File),
+    file_directory_name(File, Dir).
 user:file_search_path(pwp_demo, http_demo(pwp)).
 
 :- http_handler(root(.),
