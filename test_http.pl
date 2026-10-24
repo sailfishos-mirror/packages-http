@@ -16,12 +16,14 @@
 :- use_module(library(debug)).
 :- use_module(library(option)).
 :- use_module(library(lists)).
+:- use_module(library(time)).
 :- use_module(library(zlib), []).               % plugin
 
 test_http :-
     run_tests([ http_open,
                 http_get,
-                http_server
+                http_server,
+                http_shutdown
               ]).
 
 run_network_tests :-
@@ -346,6 +348,55 @@ post_echo_short_read(Request) :-
     format('~s', [Data]).
 
 :- end_tests(http_server).
+
+
+:- begin_tests(http_shutdown).
+
+% Stop the server while the accept thread is inside the
+% http:schedule_workers/1 hook.  The hook must not swallow the
+% http_stop(_) signal. See packages-http issue #176.
+
+test(stop_in_schedule_hook) :-
+    thread_self(Me),
+    http_server(http_dispatch,
+                [ silent(true), port(localhost:Port), workers(1) ]),
+    format(atom(Block),  'http://localhost:~w/block', [Port]),
+    format(atom(Second), 'http://localhost:~w/ok/html_1', [Port]),
+    asserta(block_handler(Me)),
+    thread_create(get_ignore(Block), C1, []),
+    thread_get_message(Me, handler_blocked(Worker), [timeout(10)]),
+    asserta(block_scheduler(Me)),
+    thread_create(get_ignore(Second), C2, []),
+    thread_get_message(Me, scheduling, [timeout(10)]),
+    thread_send_message(Worker, release),
+    call_with_time_limit(10, http_stop_server(Port, [])),
+    thread_join(C1),
+    thread_join(C2).
+
+:- dynamic
+    block_handler/1,
+    block_scheduler/1.
+:- multifile
+    http:schedule_workers/1.
+
+http:schedule_workers(_Data) :-
+    retract(block_scheduler(Main)),
+    thread_send_message(Main, scheduling),
+    thread_get_message(_Never).
+
+:- http_handler('/block', block, []).
+
+block(_Request) :-
+    retract(block_handler(Main)),
+    thread_self(Me),
+    thread_send_message(Main, handler_blocked(Me)),
+    thread_get_message(release),
+    format('Content-type: text/plain~n~nreleased~n').
+
+get_ignore(URL) :-
+    catch(http_get(URL, _, []), _, true).
+
+:- end_tests(http_shutdown).
 
 
                  /*******************************

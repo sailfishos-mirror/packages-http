@@ -586,8 +586,8 @@ http_enough_workers(Queue, Why, Peer) :-
                 },
         debug(http(scheduler), 'Asking to reschedule: ~p', [Data]),
         catch(http:schedule_workers(Data),
-              Error,
-              print_message(error, Error))
+              error(Formal, Context),
+              print_message(error, error(Formal, Context)))
     ->  true
     ;   true
     ).
