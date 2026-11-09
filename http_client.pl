@@ -50,11 +50,13 @@
 :- autoload(library(memfile),
 	    [ new_memory_file/1, open_memory_file/4, free_memory_file/1,
 	      memory_file_to_atom/3, memory_file_to_string/3,
-	      memory_file_to_codes/3, open_memory_file/3
+	      memory_file_to_codes/3, open_memory_file/3,
+	      size_memory_file/3
 	    ]).
 :- autoload(library(option),
 	    [option/3,option/2,meta_options/3,select_option/3]).
 :- autoload(library(uri),[uri_query_components/2]).
+:- use_module(library(settings),[setting/4,setting/2]).
 :- autoload(library(http/http_open),
 	    [http_open/3,http_close_keep_alive/1]).
 
@@ -82,8 +84,12 @@
                        module(atom),			% x-prolog data
                        variable_names(-list),
                        json_object(oneof([term,dict])), % JSON data
-                       value_string_as(oneof([string,atom]))
+                       value_string_as(oneof([string,atom])),
+                       max_request_size((nonneg;oneof([infinite])))
                      ]).
+
+:- setting(http:max_request_size, (nonneg;oneof([infinite])), 10_485_760,
+           'Max size in bytes of a request body read by http_read_data/3').
 
 
 /** <module> HTTP client library
@@ -228,6 +234,14 @@ http_patch(URL, In, Out, Options) :-
 %     * content_type(+Type)
 %       Overrule the content-type that is part of Request as a
 %       work-around for wrongly configured servers.
+%     * max_request_size(+Bytes)
+%       Raise an exception if the body is larger than Bytes.  Bytes
+%       is a non-negative integer or `infinite`.  If Request is an
+%       HTTP request (rather than a reply), the default is the
+%       setting `http:max_request_size`, which is 10Mb (10,485,760
+%       bytes).  The HTTP server maps the exception to a `413 Payload
+%       Too Large` reply.  Note that this also limits file uploads
+%       using =|multipart/form-data|=.
 %
 %   Without plugins, this predicate handles
 %
@@ -244,14 +258,96 @@ http_patch(URL, In, Out, Options) :-
 http_read_data(Fields, Data, QOptions) :-
     meta_options(is_meta, QOptions, Options),
     memberchk(input(In), Fields),
-    (   catch(http_read_data(In, Fields, Data, Options),
-              error(Formal,_),
-              throw(error(Formal, context(_, in_http_request))))
+    max_request_size(Fields, Options, MaxSize),
+    (   catch(read_data_limited(MaxSize, In, Fields, Data, Options),
+              error(Formal,Context),
+              data_error(Formal, Context))
     ->  true
     ;   throw(error(failed(http_read_data), _))
     ).
 
 is_meta(on_filename).
+
+data_error(Formal, Context) :-
+    Formal == resource_error(max_request_size),
+    !,
+    throw(error(Formal, Context)).
+data_error(Formal, _) :-
+    throw(error(Formal, context(_, in_http_request))).
+
+%!  max_request_size(+Fields, +Options, -MaxSize) is det.
+%
+%   MaxSize is the maximum number of bytes we are willing to read.  By
+%   default, request bodies are limited by the setting
+%   `http:max_request_size`, while replies are not limited.
+
+max_request_size(_Fields, Options, MaxSize) :-
+    option(max_request_size(MaxSize0), Options),
+    !,
+    must_be((nonneg;oneof([infinite])), MaxSize0),
+    MaxSize = MaxSize0.
+max_request_size(Fields, _Options, MaxSize) :-
+    memberchk(method(_), Fields),
+    \+ memberchk(status_code(_), Fields),
+    !,
+    setting(http:max_request_size, MaxSize).
+max_request_size(_, _, infinite).
+
+%!  read_data_limited(+MaxSize, +In, +Fields, -Data, +Options)
+%
+%   Read the body, raising an exception if it is larger than MaxSize.
+%   If the size is given by the Content-Length header, we only read
+%   that many bytes.  Otherwise, e.g., for chunked transfer encoding,
+%   we buffer at most MaxSize bytes.
+
+read_data_limited(infinite, In, Fields, Data, Options) :-
+    !,
+    http_read_data(In, Fields, Data, Options).
+read_data_limited(MaxSize, In, Fields, Data, Options) :-
+    memberchk(content_length(Len), Fields),
+    !,
+    (   Len > MaxSize
+    ->  payload_too_large(MaxSize)
+    ;   setup_call_cleanup(
+            stream_range_open(In, Range, [size(Len)]),
+            http_read_data(Range, Fields, Data, Options),
+            close(Range))
+    ).
+read_data_limited(MaxSize, In, Fields, Data, Options) :-
+    select(transfer_encoding(chunked), Fields, Fields1),
+    !,
+    setup_call_cleanup(
+        http_chunked_open(In, DataStream, []),
+        read_data_buffered(MaxSize, DataStream, Fields1, Data, Options),
+        close(DataStream)).
+read_data_limited(MaxSize, In, Fields, Data, Options) :-
+    read_data_buffered(MaxSize, In, Fields, Data, Options).
+
+read_data_buffered(MaxSize, In, Fields, Data, Options) :-
+    setup_call_cleanup(
+        new_memory_file(MemFile),
+        ( setup_call_cleanup(
+              open_memory_file(MemFile, write, Out, [encoding(octet)]),
+              ( Max1 is MaxSize+1,
+                copy_stream_data(In, Out, Max1)
+              ),
+              close(Out)),
+          size_memory_file(MemFile, Size, octet),
+          (   Size > MaxSize
+          ->  payload_too_large(MaxSize)
+          ;   true
+          ),
+          setup_call_cleanup(
+              open_memory_file(MemFile, read, MemIn, [encoding(octet)]),
+              http_read_data(MemIn, [content_length(Size)|Fields],
+                             Data, Options),
+              close(MemIn))
+        ),
+        free_memory_file(MemFile)).
+
+payload_too_large(MaxSize) :-
+    throw(error(resource_error(max_request_size),
+                context(_, payload_too_large(MaxSize)))).
 
 http_read_data(_In, Fields, Data, _Options) :-
     option(status_code(Code), Fields),

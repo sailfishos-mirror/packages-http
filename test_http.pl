@@ -17,6 +17,7 @@
 :- use_module(library(option)).
 :- use_module(library(lists)).
 :- use_module(library(time)).
+:- use_module(library(settings)).
 :- use_module(library(zlib), []).               % plugin
 
 test_http :-
@@ -221,6 +222,33 @@ test(post_echo_keep_alive_short_read_spawned,
         [ keep_alive_timeout(0.1)
         ]).
 
+test(post_too_large, Code == 413) :-
+    setting(http:max_request_size, Old),
+    setup_call_cleanup(
+        set_setting(http:max_request_size, 10),
+        request('/post/echo', Code, _Type, _Content,
+                [ post(string(text/plain, "Hello world!"))
+                ]),
+        set_setting(http:max_request_size, Old)).
+test(post_max_size, Content == Data) :-
+    Data = "Hello world!",
+    setting(http:max_request_size, Old),
+    setup_call_cleanup(
+        set_setting(http:max_request_size, 12),
+        request('/post/echo', _Code, _Type, Content,
+                [ post(string(text/plain, Data))
+                ]),
+        set_setting(http:max_request_size, Old)).
+test(post_infinite, Content == Data) :-
+    Data = "Hello world!",
+    setting(http:max_request_size, Old),
+    setup_call_cleanup(
+        set_setting(http:max_request_size, infinite),
+        request('/post/echo', _Code, _Type, Content,
+                [ post(string(text/plain, Data))
+                ]),
+        set_setting(http:max_request_size, Old)).
+
 with_server(URL, Goal, Options) :-
     setup_call_cleanup(
         http_server(http_dispatch,
@@ -349,6 +377,49 @@ post_echo_short_read(Request) :-
 
 :- end_tests(http_server).
 
+
+:- begin_tests(http_read_data).
+
+read_body(Body, Extra, Data, Options) :-
+    setup_call_cleanup(
+        open_string(Body, In),
+        http_read_data([input(In), method(post)|Extra], Data,
+                       [to(string)|Options]),
+        close(In)).
+
+chunked("5\r\nHello\r\n7\r\n world!\r\n0\r\n\r\n").
+
+test(length_ok, Data == "Hello") :-
+    read_body("Hello world!", [content_length(5)], Data,
+              [max_request_size(5)]).
+test(length_too_large,
+     error(resource_error(max_request_size), _)) :-
+    read_body("Hello world!", [content_length(12)], _,
+              [max_request_size(11)]).
+test(chunked_ok, Data == "Hello world!") :-
+    chunked(Body),
+    read_body(Body, [transfer_encoding(chunked)], Data,
+              [max_request_size(12)]).
+test(chunked_too_large,
+     error(resource_error(max_request_size), _)) :-
+    chunked(Body),
+    read_body(Body, [transfer_encoding(chunked)], _,
+              [max_request_size(11)]).
+test(no_length_too_large,
+     error(resource_error(max_request_size), _)) :-
+    read_body("Hello world!", [], _, [max_request_size(11)]).
+test(reply_unlimited, Data == "Hello world!") :-
+    setting(http:max_request_size, Old),
+    setup_call_cleanup(
+        set_setting(http:max_request_size, 5),
+        setup_call_cleanup(
+            open_string("Hello world!", In),
+            http_read_data([input(In), status_code(200)], Data,
+                           [to(string)]),
+            close(In)),
+        set_setting(http:max_request_size, Old)).
+
+:- end_tests(http_read_data).
 
 :- begin_tests(http_shutdown).
 

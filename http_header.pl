@@ -396,6 +396,7 @@ copy_stream(Out, In, Header, From, To) :-
 %      - not_found(Path)
 %      - method_not_allowed(Method, Path)
 %      - not_modified
+%      - payload_too_large(MaxSize)
 %      - resource_error(ErrorTerm)
 %      - see_other(To)
 %      - switching_protocols(Goal,Options)
@@ -508,6 +509,7 @@ status_has_content(forbidden(_URL)).
 status_has_content(not_found(_URL)).
 status_has_content(method_not_allowed(_Method, _URL)).
 status_has_content(not_acceptable(_Why)).
+status_has_content(payload_too_large(_MaxSize)).
 status_has_content(server_error(_ErrorTerm)).
 status_has_content(service_unavailable(_Why)).
 
@@ -693,6 +695,14 @@ status_page_hook(not_acceptable(WhyHTML), html_tokens(HTML), _Options) :-
                   \address
                 ]),
            HTML).
+status_page_hook(payload_too_large(MaxSize), html_tokens(HTML), _Options) :-
+    phrase(page([ title('413 Payload Too Large')
+                ],
+                [ h1('Payload Too Large'),
+                  p(\payload_too_large(MaxSize)),
+                  \address
+                ]),
+           HTML).
 status_page_hook(server_error(ErrorTerm), html_tokens(HTML), _Options) :-
     '$messages':translate_message(ErrorTerm, Lines, []),
     phrase(page([ title('500 Internal server error')
@@ -710,6 +720,14 @@ status_page_hook(service_unavailable(Why), html_tokens(HTML), _Options) :-
                   \address
                 ]),
            HTML).
+
+payload_too_large(MaxSize) -->
+    { integer(MaxSize), !,
+      format(string(Max), '~D', [MaxSize])
+    },
+    html(['The request body exceeds the maximum size of ', Max, ' bytes']).
+payload_too_large(_) -->
+    html('The request body is too large').
 
 unavailable(busy) -->
     html(p(['The server is temporarily out of resources, ',
@@ -1432,6 +1450,7 @@ status_reply_headers(server_error(_Error, Body), Body, []).
 status_reply_headers(service_unavailable(_Why, Body), Body, []).
 status_reply_headers(not_acceptable(_Why, Body), Body, []).
 status_reply_headers(bad_request(_Error, Body), Body, []).
+status_reply_headers(payload_too_large(_MaxSize, Body), Body, []).
 
 
 %!  vstatus(+Status, -Code)// is det.

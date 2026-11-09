@@ -115,6 +115,15 @@ map_exception_to_http_status(error(threads_in_pool(_Pool), _),
               busy,
               [connection(close)],
               []) :- !.
+map_exception_to_http_status(error(resource_error(max_request_size), Ctx),
+              payload_too_large(MaxSize),
+              [connection(close)],
+              []) :-
+    !,
+    (   subsumes_term(context(_, payload_too_large(_)), Ctx)
+    ->  Ctx = context(_, payload_too_large(MaxSize))
+    ;   true
+    ).
 map_exception_to_http_status(E,
               resource_error(E),
               [connection(close)],
